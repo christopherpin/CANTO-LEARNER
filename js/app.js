@@ -9,6 +9,7 @@
     colorTones: true,
     mode: "auto",          // auto | read | recall | listen | mix
     newPerDay: 10,
+    charsPerDay: 5,        // 0 turns the character drill off
     autoplay: true,
     rate: 0.85,
     voiceURI: "",
@@ -20,9 +21,11 @@
       settings: { ...DEFAULT_SETTINGS },
       cards: {},
       decks: {},            // deckId -> enabled (overrides default)
-      daily: { day: 0, newCount: 0, reviewCount: 0 },
+      daily: { day: 0, newCount: 0, reviewCount: 0, newChars: 0, speakDone: false, speakPick: "" },
       streak: { last: 0, count: 0 },
       toneQuiz: { right: 0, total: 0 },
+      practised: {},        // pattern/dialogue id -> times practised
+      start: 0,             // day number the learner started
     };
   }
 
@@ -39,6 +42,7 @@
   }
 
   let state = load();
+  if (!state.start) state.start = today();
   function save() {
     try { localStorage.setItem(KEY, JSON.stringify(state)); }
     catch (e) { toast("Couldn't save progress on this device"); }
@@ -56,7 +60,7 @@
 
   function rollDaily() {
     const t = today();
-    if (state.daily.day !== t) state.daily = { day: t, newCount: 0, reviewCount: 0 };
+    if (state.daily.day !== t) state.daily = { ...freshState().daily, day: t };
   }
 
   let toastTimer;
@@ -86,10 +90,15 @@
   }
 
   // ---------- Content ----------
+  const PATTERN_DECK = {
+    id: "patterns", name: "Sentence patterns", on: true,
+    cards: window.PATTERNS.flatMap((p) => p.examples.map(([h, j, e]) => [h, j, e, "Pattern: " + p.title + " (" + p.en + ")"])),
+  };
   const ALL_DECKS = [
     ...window.DECKS.map((d) => ({ ...d, kind: "vocab" })),
+    PATTERN_DECK,
     ...window.PHRASES.map((d) => ({ ...d, kind: "phrase" })),
-  ];
+  ].map((d) => ({ kind: "phrase", ...d }));
   const CARDS = [];
   const CARD_BY_ID = {};
   ALL_DECKS.forEach((d) => {
@@ -101,6 +110,21 @@
     });
   });
   const DECK_BY_ID = Object.fromEntries(ALL_DECKS.map((d) => [d.id, d]));
+
+  // Character drill cards live apart from the word cards.
+  const CHAR_DECK = { id: "chars", name: "Characters", kind: "char" };
+  DECK_BY_ID.chars = CHAR_DECK;
+  const CHAR_CARDS = window.CHARS.map(([h, j, e]) => {
+    const c = { id: "chars|" + h, deck: "chars", h, j, e, isChar: true };
+    CARD_BY_ID[c.id] = c;
+    return c;
+  });
+  // Up to 3 course words that use a character, as memory hooks.
+  function wordsWith(ch) {
+    const seen = new Set();
+    return CARDS.filter((c) => c.h.includes(ch) && c.h !== ch && !seen.has(c.h) && seen.add(c.h))
+      .sort((a, b) => a.h.length - b.h.length).slice(0, 3);
+  }
 
   function deckEnabled(d) {
     if (d.id in state.decks) return state.decks[d.id];
@@ -153,16 +177,21 @@
     return (r.ivl / 365).toFixed(1) + " yr";
   }
 
-  function dueCards() {
+  function dueCards(kind = "words") {
     const t = today();
-    return CARDS.filter((c) => {
+    const pool = kind === "chars" ? CHAR_CARDS : CARDS.filter((c) => deckEnabled(DECK_BY_ID[c.deck]));
+    return pool.filter((c) => {
       const r = state.cards[c.id];
-      return r && r.due <= t && deckEnabled(DECK_BY_ID[c.deck]);
+      return r && r.due <= t;
     });
   }
 
-  function newCardsAvailable() {
+  function newCardsAvailable(kind = "words") {
     rollDaily();
+    if (kind === "chars") {
+      const left = Math.max(0, state.settings.charsPerDay - state.daily.newChars);
+      return CHAR_CARDS.filter((c) => !state.cards[c.id]).slice(0, left);
+    }
     const left = Math.max(0, state.settings.newPerDay - state.daily.newCount);
     // Take new words from each switched-on list in turn, so a day mixes topics.
     const lists = ALL_DECKS.filter(deckEnabled).map((d) => d.items.filter((c) => !state.cards[c.id]));
@@ -210,11 +239,12 @@
     };
   }
 
-  function speak(text) {
-    if (!synth) { toast("Audio isn't supported in this browser"); return; }
+  function speak(text, onend) {
+    if (!synth) { toast("Audio isn't supported in this browser"); if (onend) onend(); return; }
     const clean = String(text).replace(/[…]/g, "");
     synth.cancel();
     const u = new SpeechSynthesisUtterance(clean);
+    if (onend) { u.onend = onend; u.onerror = onend; }
     u.lang = "zh-HK";
     if (cantoVoice) u.voice = cantoVoice;
     u.rate = state.settings.rate;
@@ -251,58 +281,310 @@
     window.scrollTo(0, 0);
   }
 
+  // ----- Plan helpers -----
+  function weekNumber() { return Math.floor((today() - state.start) / 7) + 1; }
+  function monthNumber() { return Math.min(12, Math.floor((today() - state.start) / 30.4) + 1); }
+  function currentStage() {
+    const m = monthNumber();
+    return window.PLAN.find((p) => m >= p.from && m <= p.to) || window.PLAN[window.PLAN.length - 1];
+  }
+
+  // Speaking curriculum: two patterns, then a conversation, repeating.
+  const SPEAK_ITEMS = (() => {
+    const pats = window.PATTERNS.map((p) => ({ type: "pattern", id: p.id, title: p.title + " · " + p.en }));
+    const dias = window.DIALOGUES.map((d) => ({ type: "dialog", id: d.id, title: d.title }));
+    const out = [];
+    for (let i = 0; i < Math.max(pats.length / 2, dias.length); i++) {
+      if (dias[i]) out.push(dias[i]);
+      pats.slice(i * 2, i * 2 + 2).forEach((p) => out.push(p));
+    }
+    return out;
+  })();
+
+  function todaysSpeak() {
+    rollDaily();
+    let it = SPEAK_ITEMS.find((x) => x.id === state.daily.speakPick);
+    if (!it) {
+      // The first item practised the fewest times, in course order.
+      const min = Math.min(...SPEAK_ITEMS.map((x) => state.practised[x.id] || 0));
+      it = SPEAK_ITEMS.find((x) => (state.practised[x.id] || 0) === min);
+      state.daily.speakPick = it.id;
+      save();
+    }
+    return it;
+  }
+
+  function markPractised(id) {
+    rollDaily();
+    state.practised[id] = (state.practised[id] || 0) + 1;
+    if (state.daily.speakPick === id) state.daily.speakDone = true;
+    bumpStreak();
+    save();
+    toast("Nice work! Marked as practised.");
+  }
+
   function homeView() {
     rollDaily();
     const due = dueCards().length;
     const fresh = newCardsAvailable().length;
-    const learned = Object.keys(state.cards).length;
+    const words = due + fresh;
+    const charsOn = state.settings.charsPerDay > 0;
+    const chars = dueCards("chars").length + newCardsAvailable("chars").length;
+    const sp = todaysSpeak();
+    const stage = currentStage();
+    const learned = CARDS.filter((c) => state.cards[c.id]).length;
     const known = CARDS.filter((c) => cardStatus(c.id) === "known").length;
-    const total = due + fresh;
+    const tip = window.TIPS[today() % window.TIPS.length];
+    const wordsDone = words === 0;
+    const speakDone = state.daily.speakDone;
+    const charsDone = chars === 0;
+    const task = (done, n, title, sub, href, btn) => `
+      <div class="task${done ? " done" : ""}">
+        <span class="check">${done ? "✓" : n}</span>
+        <div class="main"><b>${title}</b><div class="muted small">${sub}</div></div>
+        <a class="btn${done ? "" : " primary"}" href="${href}">${done ? "Again" : btn}</a>
+      </div>`;
     render(`
       ${new Date().getHours() < 12
         ? `<h1><span class="hanzi">早晨！</span> <span class="small">${jp("zou2 san4")} <span class="muted">good morning</span></span></h1>`
         : `<h1><span class="hanzi">你好！</span> <span class="small">${jp("nei5 hou2")} <span class="muted">hello</span></span></h1>`}
       ${voiceNotice()}
+      <a class="card stage-card" href="#plan">
+        <div class="muted small">Week ${weekNumber()} of 52 · Month ${monthNumber()}</div>
+        <b>${esc(stage.title)}</b>
+        <div class="small">${esc(stage.goal)}</div>
+        <div class="small" style="color:var(--accent);margin-top:4px">See the year plan ›</div>
+      </a>
       <div class="card">
         <h2 style="margin-top:0">Today</h2>
-        <p class="muted">${due} review${due === 1 ? "" : "s"} due and ${fresh} new word${fresh === 1 ? "" : "s"} ready.</p>
-        <a class="btn primary block" href="#study">${total ? `Study ${total} card${total === 1 ? "" : "s"}` : "Nothing due, practise anyway"}</a>
+        ${task(wordsDone, 1, "Flashcards", wordsDone ? "All done for today" : `${due} review${due === 1 ? "" : "s"} + ${fresh} new`, "#study", "Start")}
+        ${task(speakDone, 2, "Speaking practice", esc(sp.title), sp.type === "dialog" ? "#dialog/" + sp.id : "#pattern/" + sp.id, "Start")}
+        ${charsOn ? task(charsDone, 3, "Characters <span class='muted small'>(bonus)</span>", charsDone ? "All done for today" : `${chars} card${chars === 1 ? "" : "s"}`, "#chars", "Start") : ""}
       </div>
+      <div class="notice"><b>Tip:</b> ${esc(tip)}</div>
       <div class="grid">
         <div class="card stat"><b>${currentStreak()}</b><span>day streak</span></div>
         <div class="card stat"><b>${learned}</b><span>words started</span></div>
         <div class="card stat"><b>${known}</b><span>well known</span></div>
-        <div class="card stat"><b>${CARDS.length}</b><span>in the course</span></div>
+        <div class="card stat"><b>${Object.values(state.practised).reduce((a, b) => a + b, 0)}</b><span>speaking sessions</span></div>
       </div>
-      <h2>Where to start</h2>
+      ${weekNumber() <= 3 ? `
+      <h2>New? Start here</h2>
       <div class="card menu">
         <a href="#tones"><span>1. Learn the six tones</span><span>›</span></a>
         <a href="#guide"><span>2. How to read Jyutping</span><span>›</span></a>
-        <a href="#study"><span>3. Daily flashcards</span><span>›</span></a>
-        <a href="#phrases"><span>4. Phrases for family and kids</span><span>›</span></a>
-      </div>
+        <a href="#phrases"><span>3. Phrases for family and kids</span><span>›</span></a>
+      </div>` : ""}
     `, "home");
+  }
+
+  function planView() {
+    const cur = currentStage();
+    render(`
+      <p><a href="#home">‹ Home</a></p>
+      <h1>Your year plan</h1>
+      <p>Goal: hold everyday conversations with family in 12 months. You're in <b>week ${weekNumber()}</b>.</p>
+      <div class="notice">The app gives you the sounds, words and sentence patterns. Conversation comes from talking to real people,
+        so each stage also has things to do away from the app. Those matter most.</div>
+      ${window.PLAN.map((p) => `
+        <div class="card${p === cur ? " current" : ""}">
+          <div class="muted small">Months ${p.from}–${p.to}${p === cur ? " · <b style='color:var(--accent)'>you are here</b>" : ""}</div>
+          <h2 style="margin:4px 0">${esc(p.title)}</h2>
+          <p>${esc(p.goal)}</p>
+          <h3>In the app</h3><ul>${p.app.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>
+          <h3>In real life</h3><ul>${p.life.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>
+        </div>`).join("")}
+      <p class="muted small">Started on a different day? You can reset the plan's start date in Settings.</p>
+    `, "home");
+  }
+
+  // ----- Speaking -----
+  function speakView() {
+    const sp = todaysSpeak();
+    const item = (x) => {
+      const n = state.practised[x.id] || 0;
+      return `<a href="#${x.type}/${x.id}"><span>${x.id === sp.id ? "<b>Today:</b> " : ""}${esc(x.title)}</span>
+        <span>${n ? `<span class="pill">✓ ${n}</span>` : ""} ›</span></a>`;
+    };
+    render(`
+      <h1>Speak</h1>
+      <p class="muted">Say everything out loud. Record yourself and compare with the audio.</p>
+      <h2>Conversations</h2>
+      <p class="muted small">Listen first, then role-play your part.</p>
+      <div class="card menu">${SPEAK_ITEMS.filter((x) => x.type === "dialog").map(item).join("")}</div>
+      <h2>Sentence patterns</h2>
+      <p class="muted small">Learn one pattern and you can make hundreds of sentences.</p>
+      <div class="card menu">${SPEAK_ITEMS.filter((x) => x.type === "pattern").map(item).join("")}</div>
+      <h2>Phrase book</h2>
+      <div class="card menu"><a href="#phrases"><span>Family, kids, eating out, getting unstuck</span><span>›</span></a></div>
+    `, "speak");
+  }
+
+  function recorderHtml() {
+    if (!navigator.mediaDevices || !window.MediaRecorder) return "";
+    return `<div class="recorder card">
+      <div><b>Record yourself</b><div class="muted small">Say it, then play it back and compare with the audio.</div></div>
+      <div class="btn-row" style="align-items:center">
+        <button class="btn" data-rec>🎙 Record</button>
+        <audio controls hidden></audio>
+      </div>
+    </div>`;
+  }
+
+  let recorder = null;
+  document.addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-rec]");
+    if (!b) return;
+    const audio = b.parentElement.querySelector("audio");
+    if (recorder && recorder.state === "recording") { recorder.stop(); return; }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const chunks = [];
+      recorder = new MediaRecorder(stream);
+      recorder.ondataavailable = (ev) => chunks.push(ev.data);
+      recorder.onstop = () => {
+        stream.getTracks().forEach((t) => t.stop());
+        audio.src = URL.createObjectURL(new Blob(chunks, { type: recorder.mimeType }));
+        audio.hidden = false;
+        b.textContent = "🎙 Record again";
+        b.classList.remove("recording");
+      };
+      recorder.start();
+      b.textContent = "■ Stop";
+      b.classList.add("recording");
+    } catch (err) {
+      toast("Couldn't use the microphone. Check the browser's permission.");
+    }
+  });
+
+  function patternView(id) {
+    const p = window.PATTERNS.find((x) => x.id === id);
+    if (!p) return speakView();
+    render(`
+      <p><a href="#speak">‹ Speak</a></p>
+      <div class="muted small">Sentence pattern</div>
+      <h1><span class="hanzi">${esc(p.title)}</span></h1>
+      <p style="font-size:1.1rem">${jp(p.jp)} · <b>${esc(p.en)}</b></p>
+      <p>${esc(p.explain)}</p>
+      <h2>Step 1: listen and repeat</h2>
+      <div class="card"><ul class="list">${p.examples.map(([h, j, e]) => `
+        <li><div class="main"><div class="h hanzi">${esc(h)}</div><div>${jp(j)}</div><div class="en">${esc(e)}</div></div>${playBtn(h)}</li>`).join("")}</ul></div>
+      <h2>Step 2: say it from English</h2>
+      <div class="card"><ul class="list">${p.examples.map(([h, j, e], i) => `
+        <li><div class="main"><div><b>${esc(e)}</b></div>
+          <div class="hidden-answer" id="ans${i}" hidden><span class="hanzi">${esc(h)}</span> ${jp(j)}</div></div>
+          <button class="btn" data-show="${i}" data-text="${esc(h)}">Check</button></li>`).join("")}</ul></div>
+      ${recorderHtml()}
+      <h2>Step 3: make your own</h2>
+      <p>Make two new sentences with this pattern, using words you know. Say them to your wife and ask if they sound right.</p>
+      <button class="btn primary block" id="done">I practised this</button>
+    `, "speak");
+    $$("[data-show]").forEach((b) => b.addEventListener("click", () => {
+      $("#ans" + b.dataset.show).hidden = false;
+      speak(b.dataset.text);
+    }));
+    $("#done").addEventListener("click", () => { markPractised(p.id); location.hash = "#home"; });
+  }
+
+  let dlg = null;
+  function dialogView(id) {
+    const d = window.DIALOGUES.find((x) => x.id === id);
+    if (!d) return speakView();
+    if (!dlg || dlg.id !== id) dlg = { id, mode: "listen", step: 0, shown: {} };
+    const role = dlg.mode === "role";
+    const visible = role ? d.lines.slice(0, dlg.step + 1) : d.lines;
+    const bubble = ([who, h, j, e], i) => {
+      const mine = who === "you";
+      const hide = role && mine && !dlg.shown[i];
+      return `<div class="bubble${mine ? " mine" : ""}${role && i === dlg.step ? " current" : ""}">
+        <div class="who">${mine ? "You" : `<span class="hanzi">${esc(who)}</span>`}</div>
+        ${hide
+          ? `<div><b>Say:</b> ${esc(e)}</div><button class="btn" data-reveal="${i}" style="margin-top:6px">Check</button>`
+          : `<div class="hanzi line-h">${esc(h)}</div><div>${jp(j)}</div><div class="muted small">${esc(e)}</div>
+             <div style="margin-top:4px">${playBtnInline(h)}</div>`}
+      </div>`;
+    };
+    const finished = role && dlg.step >= d.lines.length - 1 && (d.lines[dlg.step][0] !== "you" || dlg.shown[dlg.step]);
+    render(`
+      <p><a href="#speak">‹ Speak</a></p>
+      <div class="muted small">Conversation</div>
+      <h1>${esc(d.title)}</h1>
+      <div class="seg" role="tablist">
+        <button class="${role ? "" : "on"}" data-mode="listen">1. Listen</button>
+        <button class="${role ? "on" : ""}" data-mode="role">2. Role-play</button>
+      </div>
+      <p class="muted small">${role
+        ? "You play \"You\". When it's your turn, say the line out loud before you check."
+        : "Read along and listen to the whole conversation. Then switch to role-play."}</p>
+      ${role ? "" : `<button class="btn" id="playall">▶ Play all</button>`}
+      <div class="chat">${visible.map(bubble).join("")}</div>
+      ${role && !finished ? `<button class="btn primary block" id="next">Next line</button>` : ""}
+      ${role && finished ? `<div class="btn-row"><button class="btn" id="restart">Again</button><button class="btn primary" id="done" style="flex:1">I practised this</button></div>` : ""}
+      ${role ? recorderHtml() : ""}
+    `, "speak");
+
+    $$("[data-mode]").forEach((b) => b.addEventListener("click", () => {
+      dlg = { id, mode: b.dataset.mode, step: 0, shown: {} };
+      dialogView(id);
+      if (dlg.mode === "role") playStep(d);
+    }));
+    $$("[data-reveal]").forEach((b) => b.addEventListener("click", () => {
+      const i = +b.dataset.reveal;
+      dlg.shown[i] = true;
+      dialogView(id);
+      speak(d.lines[i][1]);
+    }));
+    const pa = $("#playall");
+    if (pa) pa.addEventListener("click", () => {
+      let i = 0;
+      const next = () => {
+        $$(".bubble").forEach((el, k) => el.classList.toggle("current", k === i));
+        if (i >= d.lines.length) return;
+        const line = d.lines[i++];
+        speak(line[1], () => setTimeout(next, 400));
+      };
+      next();
+    });
+    const nx = $("#next");
+    if (nx) nx.addEventListener("click", () => {
+      if (d.lines[dlg.step][0] === "you" && !dlg.shown[dlg.step]) { dlg.shown[dlg.step] = true; dialogView(id); speak(d.lines[dlg.step][1]); return; }
+      dlg.step += 1;
+      dialogView(id);
+      playStep(d);
+      const cur = $(".bubble.current");
+      if (cur) cur.scrollIntoView({ block: "center", behavior: "smooth" });
+    });
+    const rs = $("#restart");
+    if (rs) rs.addEventListener("click", () => { dlg = { id, mode: "role", step: 0, shown: {} }; dialogView(id); playStep(d); });
+    const dn = $("#done");
+    if (dn) dn.addEventListener("click", () => { markPractised(d.id); dlg = null; location.hash = "#home"; });
+  }
+
+  function playStep(d) {
+    const line = d.lines[dlg.step];
+    if (line && line[0] !== "you") speak(line[1]);
   }
 
   // ----- Study session -----
   let session = null;
 
-  function startSession(practice) {
+  function startSession(practice, kind) {
     rollDaily();
-    let reviews = shuffle(dueCards().map((c) => c.id));
-    let news = newCardsAvailable().map((c) => c.id);
+    let reviews = shuffle(dueCards(kind).map((c) => c.id));
+    let news = newCardsAvailable(kind).map((c) => c.id);
     if (practice && !reviews.length && !news.length) {
       // Extra practice: a few random cards already started.
-      reviews = shuffle(Object.keys(state.cards).filter((id) => CARD_BY_ID[id])).slice(0, 15);
+      reviews = shuffle(Object.keys(state.cards).filter((id) => CARD_BY_ID[id] && !!CARD_BY_ID[id].isChar === (kind === "chars"))).slice(0, 15);
     }
     // Spread new cards through the reviews.
     const queue = [...reviews];
     const step = news.length ? Math.max(1, Math.floor(queue.length / news.length)) : 1;
     news.forEach((id, i) => queue.splice(Math.min(queue.length, i * (step + 1)), 0, id));
-    session = { queue, i: 0, done: 0, total: queue.length, again: 0, practice: !!practice, revealed: false, mode: null };
+    session = { kind, queue, i: 0, done: 0, total: queue.length, again: 0, practice: !!practice, revealed: false, mode: null };
   }
 
   function pickMode(id) {
+    if (CARD_BY_ID[id].isChar) return "char";
     let m = state.settings.mode;
     if (m === "auto") {
       // New words: recognise first. Reviews: mostly practise saying them.
@@ -315,19 +597,23 @@
     return m;
   }
 
-  function studyView(practice) {
-    if (!session || session.i >= session.queue.length || practice) startSession(practice);
+  function studyView(practice, kind = "words") {
+    if (!session || session.kind !== kind || session.i >= session.queue.length || practice) startSession(practice, kind);
+    const tab = kind === "chars" ? "chars" : "study";
     if (!session.queue.length) {
+      const charsOff = kind === "chars" && !state.settings.charsPerDay;
       render(`
         <div class="empty card">
           <div class="big">好嘢！</div>
-          <p><b>hou2 je5!</b> Great job, you're all caught up.</p>
-          <p class="muted">Come back tomorrow for more reviews and new words, or turn on more word lists.</p>
+          <p>${jp("hou2 je5!")} ${charsOff ? "" : "Great job, you're all caught up."}</p>
+          <p class="muted">${charsOff
+            ? "The character drill is off. Set characters per day above 0 in Settings to turn it on."
+            : kind === "chars" ? "Come back tomorrow for more characters." : "Come back tomorrow for more reviews and new words, or turn on more word lists."}</p>
           <div class="btn-row" style="justify-content:center">
-            <a class="btn" href="#practice">Extra practice</a>
-            <a class="btn" href="#decks">Word lists</a>
+            ${charsOff ? `<a class="btn" href="#settings">Settings</a>` : `<a class="btn" href="${kind === "chars" ? "#chars-practice" : "#practice"}">Extra practice</a>`}
+            ${kind === "chars" ? "" : `<a class="btn" href="#speak">Speaking practice</a>`}
           </div>
-        </div>`, "study");
+        </div>`, tab);
       return;
     }
     if (session.i >= session.queue.length) return summaryView();
@@ -341,6 +627,10 @@
     if (mode === "recall") {
       return `<div class="prompt-en">${esc(c.e)}</div><div class="muted small">Say it in Cantonese</div>`;
     }
+    if (mode === "char") {
+      return `<div class="big hanzi" style="font-size:clamp(4rem,22vw,6rem)">${esc(c.h)}</div>
+              <div class="muted small">Say its sound and meaning</div>`;
+    }
     if (mode === "listen") {
       return `<button class="btn" data-say="${esc(c.h)}" style="font-size:1.4rem;min-width:120px">🔊 Listen</button>
               <div class="muted small">What does it mean?</div>`;
@@ -351,6 +641,14 @@
   }
 
   function cardBack(c) {
+    if (c.isChar) {
+      const ex = wordsWith(c.h);
+      return `<div class="big hanzi">${esc(c.h)}</div>
+              <div class="jp-line">${jp(c.j)}</div>
+              <hr>
+              <div class="en">${esc(c.e)}</div>
+              ${ex.length ? `<div class="note">${ex.map((w) => `<span class="hanzi">${esc(w.h)}</span> ${jp(w.j)} ${esc(w.e)}`).join("<br>")}</div>` : ""}`;
+    }
     return `<div class="big hanzi">${esc(c.h)}</div>
             <div class="jp-line">${jp(c.j)}</div>
             <hr>
@@ -386,11 +684,11 @@
       <div class="card flash" id="flash">
         <div class="deck-tag">${esc(deck.name)}${isNew ? " · new" : ""}</div>
         ${body}
-        ${session.revealed || session.mode !== "listen" ? `<div>${playBtn(c.h)}</div>` : ""}
+        ${session.revealed || (session.mode !== "listen" && session.mode !== "char") ? `<div>${playBtn(c.h)}</div>` : ""}
       </div>
       ${controls}
       <p class="kbd-hint muted small">Space: show · 1–4: grade · P: play</p>
-    `, "study");
+    `, session.kind === "chars" ? "chars" : "study");
 
     const reveal = () => { if (!session.revealed) { session.revealed = true; drawCard(); } };
     $("#flash").addEventListener("click", (e) => { if (!e.target.closest("[data-say]")) reveal(); });
@@ -406,6 +704,7 @@
 
     const s = state.settings;
     if (s.autoplay && ((session.mode === "listen" && !session.revealed) || (session.revealed && session.mode !== "listen"))) {
+      // On reveal, play the card (for a character card, the character itself).
       setTimeout(() => speak(c.h), 120);
     }
   }
@@ -414,7 +713,8 @@
     const id = session.queue[session.i];
     const rec = state.cards[id];
     rollDaily();
-    if (!rec) state.daily.newCount += 1;
+    if (!rec && session.kind === "chars") state.daily.newChars += 1;
+    else if (!rec) state.daily.newCount += 1;
     else state.daily.reviewCount += 1;
     const { rec: next, requeue } = nextReview(rec, g);
     state.cards[id] = next;
@@ -433,6 +733,7 @@
 
   function summaryView() {
     const n = session.done;
+    const kind = session.kind;
     session = null;
     render(`
       <div class="empty card">
@@ -440,10 +741,10 @@
         <p>${jp("zou6 dak1 hou2!")} Well done.</p>
         <p>You reviewed <b>${n}</b> card${n === 1 ? "" : "s"}. Streak: <b>${currentStreak()}</b> day${currentStreak() === 1 ? "" : "s"}.</p>
         <div class="btn-row" style="justify-content:center">
-          <a class="btn primary" href="#home">Home</a>
-          <a class="btn" href="#practice">Extra practice</a>
+          <a class="btn primary" href="#home">Back to today's plan</a>
+          <a class="btn" href="${kind === "chars" ? "#chars-practice" : "#practice"}">Extra practice</a>
         </div>
-      </div>`, "study");
+      </div>`, kind === "chars" ? "chars" : "study");
   }
 
   // ----- Word lists -----
@@ -529,7 +830,7 @@
           <li><div class="main"><span class="hanzi h">咗</span> ${jp("zo2")}<div class="en">after a verb: done/completed: 食咗 "ate"</div></div>${playBtn("食咗")}</li>
         </ul>
       </div>
-    `, "phrases");
+    `, "speak");
     bindDeckToggles();
   }
 
@@ -595,7 +896,7 @@
       <p>Syllables ending in <b>-p, -t, -k</b> are short and clipped. They only take tones 1, 3 and 6, e.g.
         <span class="hanzi">識</span> ${jp("sik1")} (know), <span class="hanzi">錫</span> ${jp("sek3")} (kiss), <span class="hanzi">食</span> ${jp("sik6")} (eat).</p>
       <p class="muted small">Tip: tone colours are used everywhere in the app so you start to see tones as well as hear them. You can turn them off in Settings.</p>
-    `, "tones");
+    `, "more");
 
     const fb = $("#qfeedback");
     const item = () => quiz.set.items[quiz.idx];
@@ -656,6 +957,9 @@
     render(`
       <h1>More</h1>
       <div class="card menu">
+        <a href="#plan"><span>Your year plan</span><span>›</span></a>
+        <a href="#tones"><span>The six tones</span><span>›</span></a>
+        <a href="#phrases"><span>Phrase book</span><span>›</span></a>
         <a href="#decks"><span>Word lists</span><span>›</span></a>
         <a href="#guide"><span>Jyutping guide</span><span>›</span></a>
         <a href="#settings"><span>Settings & backup</span><span>›</span></a>
@@ -711,6 +1015,8 @@
           </select></div>
         <div class="setting"><label for="s-new">New words per day</label>
           <input id="s-new" type="number" min="0" max="50" value="${s.newPerDay}" style="width:80px"></div>
+        <div class="setting"><label for="s-chars">Characters per day<div class="muted small">The bonus character drill. 0 turns it off.</div></label>
+          <input id="s-chars" type="number" min="0" max="30" value="${s.charsPerDay}" style="width:80px"></div>
         ${sw("showHanzi", "Show Chinese characters", "Turn off to learn from Jyutping only")}
         ${sw("jpOnFront", "Show Jyutping on the front", "When off, you see only characters until you reveal")}
         ${sw("colorTones", "Colour Jyutping by tone")}
@@ -749,6 +1055,8 @@
 
       <h2>Reset</h2>
       <div class="card">
+        <p class="small muted">Restart the year plan from week 1 (keeps your flashcards).</p>
+        <button class="btn" id="reset-plan" style="margin-bottom:16px">Restart plan</button>
         <p class="small muted">Erase all progress on this device. Settings are kept.</p>
         <button class="btn" id="reset">Reset progress</button>
       </div>
@@ -760,6 +1068,11 @@
       s.newPerDay = Math.max(0, Math.min(50, parseInt(e.target.value, 10) || 0));
       e.target.value = s.newPerDay; session = null; save();
     });
+    $("#s-chars").addEventListener("change", (e) => {
+      s.charsPerDay = Math.max(0, Math.min(30, parseInt(e.target.value, 10) || 0));
+      e.target.value = s.charsPerDay; session = null; save();
+    });
+    $("#reset-plan").addEventListener("click", () => { state.start = today(); save(); toast("Plan restarted from week 1"); });
     $("#s-rate").addEventListener("input", (e) => { s.rate = +e.target.value; $("#rate-val").textContent = s.rate.toFixed(2) + "×"; save(); });
     const vs = $("#s-voice");
     if (vs) vs.addEventListener("change", () => { s.voiceURI = vs.value; refreshVoices(); save(); speak("你好"); });
@@ -798,6 +1111,12 @@
     switch (name) {
       case "study": return studyView(false);
       case "practice": session = null; return studyView(true);
+      case "chars": return studyView(false, "chars");
+      case "chars-practice": session = null; return studyView(true, "chars");
+      case "speak": return speakView();
+      case "pattern": return patternView(arg);
+      case "dialog": return dialogView(arg);
+      case "plan": return planView();
       case "tones": return tonesView();
       case "phrases": return phrasesView();
       case "decks": return decksView();

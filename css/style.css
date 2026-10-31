@@ -232,3 +232,39 @@ input[type=range] { accent-color: var(--accent); }
 
 .empty { text-align: center; padding: 32px 16px; }
 .empty .big { font-size: 3rem; font-family: var(--hanzi); }
+
+/* Today's plan */
+.task { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.task:last-child { border-bottom: 0; }
+.task .main { flex: 1; min-width: 0; }
+.task .check {
+  width: 30px; height: 30px; border-radius: 99px; flex: none; display: grid; place-items: center;
+  border: 2px solid var(--line); font-weight: 700; color: var(--muted);
+}
+.task.done .check { background: var(--ok); border-color: var(--ok); color: #fff; }
+.task.done b { color: var(--muted); }
+.task .btn { min-height: 38px; padding: 6px 14px; }
+.stage-card { display: block; text-decoration: none; color: var(--text); }
+.stage-card b { font-size: 1.1rem; display: block; margin: 2px 0; }
+.card.current { border: 2px solid var(--accent); }
+.pill { background: var(--surface-2); border-radius: 99px; padding: 1px 8px; font-size: .75rem; color: var(--ok); font-weight: 600; }
+
+/* Segmented control */
+.seg { display: inline-flex; background: var(--surface-2); border-radius: 12px; padding: 3px; gap: 3px; margin: 4px 0 8px; }
+.seg button { border: 0; background: transparent; border-radius: 9px; padding: 8px 14px; font-weight: 600; cursor: pointer; color: var(--muted); }
+.seg button.on { background: var(--surface); color: var(--text); box-shadow: var(--shadow); }
+
+/* Conversation */
+.chat { display: flex; flex-direction: column; gap: 10px; margin: 14px 0; }
+.bubble {
+  max-width: 85%; background: var(--surface); border: 1px solid var(--line); border-radius: 16px 16px 16px 4px;
+  padding: 10px 14px; align-self: flex-start;
+}
+.bubble.mine { align-self: flex-end; background: var(--accent-soft); border-radius: 16px 16px 4px 16px; }
+.bubble.current { outline: 2px solid var(--accent); }
+.bubble .who { font-size: .75rem; color: var(--muted); font-weight: 600; }
+.bubble .line-h { font-size: 1.3rem; }
+.recorder { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; }
+.recorder audio { height: 40px; max-width: 100%; }
+.btn.recording { background: #e03131; border-color: #e03131; color: #fff; }
+.flash .note .jp { font-size: inherit; }

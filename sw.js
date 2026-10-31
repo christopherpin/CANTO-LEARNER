@@ -1,6 +1,6 @@
 // Offline support: serve from cache, refresh the cache in the background.
-const CACHE = "canto-v1";
-const FILES = ["./", "index.html", "css/style.css", "js/data.js", "js/app.js", "manifest.webmanifest", "icons/icon.svg", "icons/icon-192.png"];
+const CACHE = "canto-v2";
+const FILES = ["./", "index.html", "css/style.css", "js/data.js", "js/speak-data.js", "js/app.js", "manifest.webmanifest", "icons/icon.svg", "icons/icon-192.png"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(FILES)).then(() => self.skipWaiting()));
