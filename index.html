@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Canto Learner</title>
+  <meta name="description" content="Learn Cantonese: Jyutping, tones, flashcards and phrases.">
+  <meta name="theme-color" content="#c0392b">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Canto">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <a href="#home" class="brand"><span class="brand-mark">粵</span> Canto Learner</a>
+  </header>
+
+  <main id="view" tabindex="-1"></main>
+
+  <nav class="tabbar" aria-label="Main">
+    <a href="#home" data-tab="home"><span class="ico">家</span><span>Home</span></a>
+    <a href="#study" data-tab="study"><span class="ico">卡</span><span>Study</span></a>
+    <a href="#tones" data-tab="tones"><span class="ico">聲</span><span>Tones</span></a>
+    <a href="#phrases" data-tab="phrases"><span class="ico">句</span><span>Phrases</span></a>
+    <a href="#more" data-tab="more"><span class="ico">多</span><span>More</span></a>
+  </nav>
+
+  <div id="toast" role="status" aria-live="polite"></div>
+
+  <script src="js/data.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
